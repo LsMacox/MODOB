@@ -16,8 +16,3 @@ engine = create_async_engine(DATABASE_URL, echo=False, pool_pre_ping=True)
 async_session = async_sessionmaker(engine, expire_on_commit=False, autoflush=False)
 
 Base = declarative_base()
-
-async def init_db() -> None:
-    """Create tables on first run if they do not exist."""
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
