@@ -8,7 +8,7 @@ WORKDIR /app
 
 # Install deps
 COPY requirements.txt .
-RUN pip install --upgrade pip && \
+RUN pip install --upgrade pip -i https://mirrors.aliyun.com/pypi/simple/ --trusted-host mirrors.aliyun.com && \
     pip install -r requirements.txt
 
 # Copy project
