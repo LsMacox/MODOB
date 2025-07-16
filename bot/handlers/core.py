@@ -332,7 +332,7 @@ def match_keyword(text: str, keyword: Keyword) -> Tuple[bool, float]:
     
     # Для очень длинных сообщений и коротких ключевых слов
     # применяем окно скольжения сразу
-    if len(text) > 1000 and len(phrase) < 10 and not keyword.pattern_enabled:
+    if len(text) > 1000 and len(phrase) < 10 and not keyword.is_pattern:
         return sliding_window_match_direct(text, phrase, keyword), 0.95
     
     # Стандартная проверка на включение
@@ -340,7 +340,7 @@ def match_keyword(text: str, keyword: Keyword) -> Tuple[bool, float]:
         return True, 1.0
         
     # Проверка по шаблону, если включено
-    if keyword.pattern_enabled:
+    if keyword.is_pattern:
         if match_with_pattern(text, phrase):
             return True, 1.0
     
