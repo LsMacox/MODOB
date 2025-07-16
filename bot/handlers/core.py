@@ -480,17 +480,20 @@ async def process_long_message_with_timeout(update: Update, context: ContextType
         logger.error(f"Error in processing long message: {e}")
 
 
+# Захардкоженный тег для упоминания пользователя
+USER_MENTION_TAG = "{user}"
+
 async def _respond(update: Update, context: ContextTypes.DEFAULT_TYPE, kw: Keyword) -> None:
     response_text = kw.response_text
     
-    # Обработка подстановки упоминания пользователя, если указан mention_tag
-    if kw.response_text and kw.mention_tag and kw.mention_tag in kw.response_text:
+    # Обработка подстановки упоминания пользователя, если в тексте есть тег USER_MENTION_TAG
+    if kw.response_text and USER_MENTION_TAG in kw.response_text:
         # Получаем информацию о пользователе
         user = update.message.from_user
         user_mention = f"@{user.username}" if user.username else user.first_name
         
         # Заменяем тег на упоминание пользователя
-        response_text = kw.response_text.replace(kw.mention_tag, user_mention)
+        response_text = kw.response_text.replace(USER_MENTION_TAG, user_mention)
         await update.message.reply_text(response_text)
         return
     elif kw.response_text:
