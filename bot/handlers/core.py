@@ -6,7 +6,7 @@ import fnmatch
 import logging
 import re
 from difflib import SequenceMatcher
-from typing import Iterable, Optional, Dict, Tuple
+from typing import Iterable, Optional, Dict, Tuple, List
 
 from telegram import Update
 from telegram.ext import ContextTypes, MessageHandler, filters
@@ -16,6 +16,9 @@ from ..anti_spam import check_spam
 from ..cache import file_cache
 from ..database import async_session
 from ..models import GroupSetting, Keyword
+
+# Максимальный размер скользящего окна для проверки очень длинных сообщений
+MAX_WINDOW_SIZE = 200  # символов
 
 logger = logging.getLogger(__name__)
 
@@ -67,13 +70,71 @@ def transliterate_en_to_ru(text: str) -> str:
 
 def match_with_pattern(text: str, pattern: str) -> bool:
     """Проверяет, соответствует ли текст заданному паттерну"""
-    # Используем fnmatch для поддержки простых шаблонов (* и ?)
+    # Для длинных текстов используем оптимизированный подход
+    if len(text) > 500:  # Порог для оптимизации
+        return optimized_pattern_match(text, pattern)
+    
+    # Для коротких текстов используем обычный fnmatch
     return fnmatch.fnmatch(text, pattern)
+
+def optimized_pattern_match(text: str, pattern: str) -> bool:
+    """Оптимизированная версия проверки шаблонов для длинных текстов"""
+    # Если в шаблоне нет специальных символов (* и ?), то просто проверяем наличие подстроки
+    if '*' not in pattern and '?' not in pattern:
+        return pattern in text
+    
+    # Если шаблон начинается и заканчивается звездочками (*pattern*), ищем только середину
+    if pattern.startswith('*') and pattern.endswith('*') and pattern.count('*') == 2 and '?' not in pattern:
+        # Извлекаем текст между звездочками и ищем его в тексте
+        middle_pattern = pattern[1:-1]
+        return middle_pattern in text
+    
+    # Если шаблон начинается с звездочки (*pattern), проверяем окончание текста
+    if pattern.startswith('*') and not pattern.endswith('*') and pattern.count('*') == 1 and '?' not in pattern:
+        suffix = pattern[1:]
+        return text.endswith(suffix)
+    
+    # Если шаблон заканчивается на звездочку (pattern*), проверяем начало текста
+    if pattern.endswith('*') and not pattern.startswith('*') and pattern.count('*') == 1 and '?' not in pattern:
+        prefix = pattern[:-1]
+        return text.startswith(prefix)
+    
+    # Для более сложных шаблонов применяем подход со скользящим окном
+    # Преобразуем шаблон в регулярное выражение
+    import re
+    # Преобразование шаблона fnmatch в regex
+    regex_pattern = fnmatch.translate(pattern)
+    
+    # Используем скользящее окно для длинных текстов
+    regex = re.compile(regex_pattern)
+    
+    # Размер окна - больше для обработки длинных ключевых слов
+    window_size = min(len(text), MAX_WINDOW_SIZE * 2)
+    overlap = min(200, window_size // 2)  # Перекрытие окон для обеспечения непрерывности
+    
+    # Проверяем каждое окно текста
+    for i in range(0, len(text), window_size - overlap):
+        chunk = text[i:i + window_size]
+        if regex.fullmatch(chunk):
+            return True
+        
+        # Проверяем также на совпадение частично или внутри чанка
+        if regex.search(chunk):
+            return True
+    
+    # Если прошли весь текст и не нашли совпадений
+    return False
 
 def fuzzy_match(text: str, phrase: str, threshold: float = 0.9) -> bool:
     """Нечеткое сравнение для поиска похожей подстроки в тексте, с учетом вариаций длины"""
     if not phrase:
         return False
+    
+    # Для длинных текстов применяем оптимизированный подход
+    if len(text) > 200:  # Порог для оптимизации
+        return optimized_fuzzy_match(text, phrase, threshold)
+    
+    # Для коротких текстов используем прежний алгоритм
     p_len = len(phrase)
     t_len = len(text)
     if t_len < int(p_len * 0.8):
@@ -88,25 +149,96 @@ def fuzzy_match(text: str, phrase: str, threshold: float = 0.9) -> bool:
                 return True
     return False
 
+def optimized_fuzzy_match(text: str, phrase: str, threshold: float = 0.9) -> bool:
+    """Оптимизированная версия fuzzy_match для длинных текстов"""
+    p_len = len(phrase)
+    
+    # Разбиваем текст на слова
+    words = text.split()
+    
+    # Предварительная фильтрация: сначала проверяем отдельные слова и их окружение
+    # Это позволяет избежать проверки всех возможных подстрок
+    for i, word in enumerate(words):
+        # Если слово близко к фразе по длине, проверим его
+        if 0.5 <= len(word) / p_len <= 2.0:
+            matcher = SequenceMatcher(None, word, phrase)
+            if matcher.ratio() >= threshold * 0.8:  # Немного снижаем порог для первичной проверки
+                return True
+        
+        # Проверяем группы из 2-3 слов (если возможно)
+        if i < len(words) - 1:
+            two_words = ' '.join(words[i:i+2])
+            if 0.7 <= len(two_words) / p_len <= 1.5:
+                matcher = SequenceMatcher(None, two_words, phrase)
+                if matcher.ratio() >= threshold:
+                    return True
+        
+        if i < len(words) - 2:
+            three_words = ' '.join(words[i:i+3])
+            if 0.8 <= len(three_words) / p_len <= 1.3:
+                matcher = SequenceMatcher(None, three_words, phrase)
+                if matcher.ratio() >= threshold:
+                    return True
+    
+    # Применяем скользящее окно
+    return sliding_window_match(text, phrase, threshold)
+
+def sliding_window_match(text: str, phrase: str, threshold: float = 0.9) -> bool:
+    """Проверяет, содержит ли текст фразу с помощью скользящего окна"""
+    p_len = len(phrase)
+    t_len = len(text)
+    window_size = min(t_len, MAX_WINDOW_SIZE)
+    
+    for i in range(t_len - window_size + 1):
+        window = text[i:i + window_size]
+        matcher = SequenceMatcher(None, window, phrase)
+        if matcher.ratio() >= threshold:
+            return True
+    
+    return False
+
+def sliding_window_match_direct(text: str, phrase: str, keyword: Keyword) -> bool:
+    """Проверяет, содержит ли текст ключевое слово с помощью скользящего окна"""
+    p_len = len(phrase)
+    t_len = len(text)
+    window_size = min(t_len, MAX_WINDOW_SIZE)
+    
+    for i in range(t_len - window_size + 1):
+        window = text[i:i + window_size]
+        if keyword.transliterate_enabled:
+            window_en = transliterate_ru_to_en(window)
+            if phrase in window_en:
+                return True
+        else:
+            if phrase in window:
+                return True
+    
+    return False
+
 def match_keyword(text: str, keyword: Keyword) -> Tuple[bool, float]:
     """Проверяет, соответствует ли текст ключевому слову с учетом всех опций"""
     phrase = keyword.phrase
-    original_text = text
     
     # Применяем чувствительность к регистру
     if not keyword.case_sensitive:
         text = text.lower()
         phrase = phrase.lower()
     
+    # Для очень длинных сообщений и коротких ключевых слов
+    # применяем окно скольжения сразу
+    if len(text) > 1000 and len(phrase) < 10 and not keyword.pattern_enabled:
+        return sliding_window_match_direct(text, phrase, keyword), 0.95
+    
     # Стандартная проверка на включение
     if phrase in text:
         return True, 1.0
+        
+    # Проверка по шаблону, если включено
+    if keyword.pattern_enabled:
+        if match_with_pattern(text, phrase):
+            return True, 1.0
     
-    # Если включен паттерн, проверяем соответствие паттерну
-    if keyword.is_pattern and match_with_pattern(text, phrase):
-        return True, 1.0
-    
-    # Проверяем транслитерацию, если она включена
+    # Проверяем транслитерацию, если включена
     if keyword.transliterate_enabled:
         # Пробуем транслитерировать русский текст в английский
         trans_text_en = transliterate_ru_to_en(text)
@@ -157,31 +289,89 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     text = update.message.text or update.message.caption or ""
     if not text:
         return
+    
+    # Для длинных сообщений логируем длину для отладки
+    if len(text) > 500:
+        logger.debug(f"Processing long message: {len(text)} characters")
 
-    async with async_session() as session:
-        kw_stmt = (
-            select(Keyword)
-            .join(GroupSetting)
-            .where(GroupSetting.chat_id == update.effective_chat.id)
-        )
-        kw_rows: Iterable[Keyword] = (await session.scalars(kw_stmt)).all()
-        
-        # Поиск соответствующего ключевого слова с учетом всех опций
-        best_match = None
-        best_match_score = 0.0
-        
-        for kw in kw_rows:
-            is_match, score = match_keyword(text, kw)
-            if is_match and score > best_match_score:
-                best_match = kw
-                best_match_score = score
-                # Если нашли точное совпадение (score = 1.0), можно прекратить поиск
-                if score >= 1.0:
-                    break
-        
-        # Отвечаем на первое найденное совпадение
-        if best_match:
-            await _respond(update, context, best_match)
+    try:
+        async with asyncio.timeout(2):  # Таймаут 2 секунды на поиск ключевых слов
+            async with async_session() as session:
+                kw_stmt = (
+                    select(Keyword)
+                    .join(GroupSetting)
+                    .where(GroupSetting.chat_id == update.effective_chat.id)
+                )
+                kw_rows: Iterable[Keyword] = (await session.scalars(kw_stmt)).all()
+                
+                # Поиск соответствующего ключевого слова с учетом всех опций
+                best_match = None
+                best_match_score = 0.0
+                
+                for kw in kw_rows:
+                    is_match, score = match_keyword(text, kw)
+                    if is_match and score > best_match_score:
+                        best_match = kw
+                        best_match_score = score
+                        # Если нашли точное совпадение (score = 1.0), можно прекратить поиск
+                        if score >= 1.0:
+                            break
+                
+                # Отвечаем на первое найденное совпадение
+                if best_match:
+                    await _respond(update, context, best_match)
+    except asyncio.TimeoutError:
+        logger.warning(f"Keyword detection timed out for message of length {len(text)}")
+        # Для таймаутов при длинных сообщениях применяем упрощенный алгоритм поиска
+        # только для прямых совпадений (без нечёткого поиска)
+        await process_long_message_with_timeout(update, context, text)
+
+
+async def process_long_message_with_timeout(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str) -> None:
+    """
+    Обрабатывает длинные сообщения, которые вызвали таймаут при обычной обработке.
+    Использует более простой и быстрый алгоритм поиска ключевых слов (только прямое совпадение).
+    """
+    try:
+        # Получаем все ключевые слова для группы
+        async with async_session() as session:
+            kw_stmt = (
+                select(Keyword)
+                .join(GroupSetting)
+                .where(GroupSetting.chat_id == update.effective_chat.id)
+            )
+            kw_rows: Iterable[Keyword] = (await session.scalars(kw_stmt)).all()
+            
+            # Используем более быстрый алгоритм: проверяем только прямое включение фразы
+            # без нечеткого поиска и других ресурсоемких операций
+            for kw in kw_rows:
+                phrase = kw.phrase
+                
+                # Применяем чувствительность к регистру
+                if not kw.case_sensitive:
+                    check_text = text.lower()
+                    check_phrase = phrase.lower()
+                else:
+                    check_text = text
+                    check_phrase = phrase
+                
+                # Проверяем прямое включение фразы в тексте
+                if check_phrase in check_text:
+                    await _respond(update, context, kw)
+                    return
+                
+                # Для коротких фраз проверяем скользящим окном
+                if len(phrase) < 15:
+                    # Разбиваем длинное сообщение на части по MAX_WINDOW_SIZE символов с перекрытием
+                    chunk_size = MAX_WINDOW_SIZE
+                    overlap = len(phrase)
+                    for i in range(0, len(check_text), chunk_size - overlap):
+                        chunk = check_text[i:i + chunk_size]
+                        if check_phrase in chunk:
+                            await _respond(update, context, kw)
+                            return
+    except Exception as e:
+        logger.error(f"Error in processing long message: {e}")
 
 
 async def _respond(update: Update, context: ContextTypes.DEFAULT_TYPE, kw: Keyword) -> None:
