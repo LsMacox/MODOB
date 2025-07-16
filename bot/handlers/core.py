@@ -143,7 +143,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
 
     # Получаем текст сообщения (не приводим к нижнему регистру сразу, это делается в match_keyword при необходимости)
-    text = update.message.text or ""
+    text = update.message.text or update.message.caption or ""
     if not text:
         return
 
