@@ -41,5 +41,6 @@ class Keyword(Base):
     case_sensitive: Mapped[bool] = mapped_column(Boolean, default=False)  # Учитывать ли регистр
     transliterate_enabled: Mapped[bool] = mapped_column(Boolean, default=False)  # Включить транслитерацию
     fuzzy_enabled: Mapped[bool] = mapped_column(Boolean, default=False)  # Включить нечеткое сравнение
+    mention_tag: Mapped[str | None] = mapped_column(String(50), nullable=True)  # Тег для подстановки упоминания пользователя
 
     group: Mapped["GroupSetting"] = relationship(back_populates="keywords")
