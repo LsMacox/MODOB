@@ -71,19 +71,21 @@ def match_with_pattern(text: str, pattern: str) -> bool:
     return fnmatch.fnmatch(text, pattern)
 
 def fuzzy_match(text: str, phrase: str, threshold: float = 0.9) -> bool:
-    """Нечеткое сравнение для поиска похожей подстроки в тексте"""
+    """Нечеткое сравнение для поиска похожей подстроки в тексте, с учетом вариаций длины"""
     if not phrase:
         return False
     p_len = len(phrase)
     t_len = len(text)
-    if t_len < p_len:
-        matcher = SequenceMatcher(None, text, phrase)
-        return matcher.ratio() >= threshold
-    for i in range(t_len - p_len + 1):
-        substring = text[i:i + p_len]
-        matcher = SequenceMatcher(None, substring, phrase)
-        if matcher.ratio() >= threshold:
-            return True
+    if t_len < int(p_len * 0.8):
+        return False
+    min_len = max(1, int(p_len * 0.8))
+    max_len = int(p_len * 1.2) + 1
+    for l in range(min_len, max_len + 1):
+        for i in range(t_len - l + 1):
+            substring = text[i:i + l]
+            matcher = SequenceMatcher(None, substring, phrase)
+            if matcher.ratio() >= threshold:
+                return True
     return False
 
 def match_keyword(text: str, keyword: Keyword) -> Tuple[bool, float]:
