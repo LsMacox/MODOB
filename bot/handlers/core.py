@@ -184,15 +184,121 @@ def optimized_fuzzy_match(text: str, phrase: str, threshold: float = 0.9) -> boo
     return sliding_window_match(text, phrase, threshold)
 
 def sliding_window_match(text: str, phrase: str, threshold: float = 0.9) -> bool:
-    """Проверяет, содержит ли текст фразу с помощью скользящего окна"""
-    p_len = len(phrase)
-    t_len = len(text)
-    window_size = min(t_len, MAX_WINDOW_SIZE)
+    """Use sliding window approach to find fuzzy matches in long text"""
+    # Быстрый путь: проверим сначала прямое вхождение подстроки
+    if phrase.lower() in text.lower():
+        return True
     
-    for i in range(t_len - window_size + 1):
-        window = text[i:i + window_size]
-        matcher = SequenceMatcher(None, window, phrase)
-        if matcher.ratio() >= threshold:
+    # Специальная обработка для очень коротких слов (без пробелов)
+    if ' ' not in phrase and len(phrase) <= 10:
+        # Ищем среди слов текста похожие слова
+        text_words = text.lower().split()
+        phrase_lower = phrase.lower()
+        
+        for word in text_words:
+            # Выбираем порог в зависимости от длины слова
+            word_threshold = 0.7 if len(phrase) <= 4 else 0.75 if len(phrase) <= 6 else 0.8
+            similarity = SequenceMatcher(None, word, phrase_lower).ratio()
+            
+            # Для длинных слов (как компьютер) достаточно более высокого порога
+            if len(word) >= 8 and len(phrase) >= 8 and abs(len(word) - len(phrase)) <= 2:
+                word_threshold = 0.85
+                
+            if similarity >= word_threshold:
+                # Дополнительная проверка для отсечения ложных совпадений
+                if len(word) == len(phrase) or abs(len(word) - len(phrase)) <= 2:
+                    # Если длина слов похожа и они очень похожи, то это скорее всего опечатка
+                    return True
+    
+    # Проверяем последовательность слов, если это возможно
+    # Это хорошо работает для ключевых фраз, состоящих из нескольких слов
+    text_words = text.lower().split()
+    phrase_words = phrase.lower().split()
+    
+    if len(phrase_words) > 1:
+        # Для точных совпадений слов
+        for i in range(len(text_words) - len(phrase_words) + 1):
+            exact_match = True
+            for j in range(len(phrase_words)):
+                if text_words[i+j] != phrase_words[j]:
+                    exact_match = False
+                    break
+            if exact_match:
+                return True
+        
+        # Проверка небольших опечаток в словах: сначала проверяем, насколько каждое слово совпадает
+        for i in range(len(text_words) - len(phrase_words) + 1):
+            # Для каждого слова рассчитываем коэффициент сходства
+            word_similarities = []
+            for j in range(len(phrase_words)):
+                word_similarity = SequenceMatcher(None, text_words[i+j], phrase_words[j]).ratio()
+                word_similarities.append(word_similarity)
+            
+            # Рассчитываем средний коэффициент сходства для всех слов в последовательности
+            avg_word_similarity = sum(word_similarities) / len(word_similarities)
+            # И количество слов с высоким совпадением
+            high_similarity_count = sum(1 for sim in word_similarities if sim >= 0.9)
+            
+            # Проверяем разные условия для определения совпадения с небольшими опечатками:
+            # 1. Средний коэффициент сходства по всем словам высокий И большинство слов точно совпадают
+            # 2. Только одно слово имеет опечатку, а остальные точно совпадают
+            if (avg_word_similarity >= 0.9 and high_similarity_count >= len(phrase_words) * 0.7) or \
+               (len(phrase_words) >= 3 and high_similarity_count >= len(phrase_words) - 1):
+                # Проверяем все выражение целиком для уверенности
+                window = text_words[i:i+len(phrase_words)]
+                window_text = ' '.join(window)
+                phrase_text = phrase.lower()
+                total_ratio = SequenceMatcher(None, window_text, phrase_text).ratio()
+                
+                # Для длинных фраз требования могут быть ниже, для коротких - выше
+                min_threshold = 0.9 if len(phrase_words) >= 4 else 0.92
+                if total_ratio >= min_threshold:
+                    return True
+    
+    # Для коротких фраз и одиночных слов с опечатками
+    if len(phrase) <= 15 or ' ' not in phrase:
+        # Ищем похожие фрагменты в тексте
+        best_ratio = 0
+        phrase_lower = phrase.lower()
+        
+        # Для коротких фраз проверяем скользящим окном близким по размеру к самой фразе
+        window_size = min(len(phrase) * 2, 30)
+        for i in range(len(text) - window_size + 1):
+            chunk = text[i:i+window_size].lower()
+            ratio = SequenceMatcher(None, chunk, phrase_lower).ratio()
+            best_ratio = max(best_ratio, ratio)
+            
+            # Нашли очень близкое совпадение
+            if ratio >= 0.9:
+                return True
+    
+    # Для длинных текстов используем скользящее окно большего размера
+    window_size = min(200, max(len(text), len(phrase) * 3))
+    overlap = len(phrase)
+    
+    for i in range(0, len(text), window_size - overlap):
+        chunk = text[i:i + window_size]
+        if len(chunk) < len(phrase) // 2:  # Пропускаем короткие куски
+            continue
+        
+        # Применяем нечеткое сравнение с корректированным порогом
+        # Для фраз разной длины используем разные пороги
+        adjusted_threshold = threshold
+        if ' ' not in phrase:
+            if len(phrase) < 7:  # Для очень коротких слов
+                # Для очень коротких слов снижаем порог сильнее
+                adjusted_threshold = 0.8
+            elif len(phrase) < 10:
+                # Для коротких одиночных слов допускаем опечатки, снижаем порог
+                adjusted_threshold = 0.85
+        elif len(phrase.split()) >= 4:
+            # Для длинных фраз повышаем требования
+            adjusted_threshold = max(threshold, 0.95)
+        else:
+            # Для средних фраз средний порог
+            adjusted_threshold = max(threshold, 0.9)
+            
+        if SequenceMatcher(None, chunk.lower(), phrase.lower()).ratio() >= adjusted_threshold:
             return True
     
     return False
