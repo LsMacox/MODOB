@@ -532,7 +532,7 @@ async def refresh_keywords_list(update: Update, context: ContextTypes.DEFAULT_TY
             # If no keywords left, show empty message with add button
             keyboard = [
                 [InlineKeyboardButton("➕ Добавить слово", callback_data=f"kw:add_start:{chat_id}")],
-                [InlineKeyboardButton("« Назад", callback_data="panel:back")]
+                [InlineKeyboardButton("« Назад к управлению группой", callback_data=f"private:manage:{chat_id}")]
             ]
             await query.edit_message_text(
                 "Список ключевых слов пуст.", 
@@ -550,7 +550,7 @@ async def refresh_keywords_list(update: Update, context: ContextTypes.DEFAULT_TY
         
         # Add add word button and back button
         keyboard.append([InlineKeyboardButton("➕ Добавить слово", callback_data=f"kw:add_start:{chat_id}")])
-        keyboard.append([InlineKeyboardButton("« Назад", callback_data="panel:back")])
+        keyboard.append([InlineKeyboardButton("« Назад к управлению группой", callback_data=f"private:manage:{chat_id}")])
         
         message_text = "Управление ключевыми словами:\nНажмите на слово для редактирования или на ❌ для удаления"
         
