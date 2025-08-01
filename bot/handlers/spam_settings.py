@@ -11,6 +11,7 @@ from telegram.constants import ChatMemberStatus
 
 from ..database import async_session
 from ..models import GroupSetting
+from .keyword_management import list_keywords_private, allowed_links_list
 from .db_utils import ensure_group
 from ..anti_spam import BAN_DURATIONS
 
@@ -52,6 +53,7 @@ async def show_spam_settings(update: Update, context: ContextTypes.DEFAULT_TYPE)
             [InlineKeyboardButton(f"{'🟢' if grp.link_spam_enabled else '🔴'} Блокировка за ссылки", callback_data=f"link_spam_toggle:{chat_id}")],
             [InlineKeyboardButton("Изменить лимит ссылок", callback_data=f"link_spam_limit:{chat_id}")],
             [InlineKeyboardButton("Разбанить пользователей", callback_data=f"show_banned:{chat_id}")],
+            [InlineKeyboardButton("Черный список ссылок", callback_data=f"blacklist_links:{chat_id}")],
             [InlineKeyboardButton("« Назад к управлению", callback_data=f"private:manage:{chat_id}")]
         ]
         
@@ -151,7 +153,20 @@ async def spam_settings_callback(update: Update, context: ContextTypes.DEFAULT_T
             "Это временной интервал, в течение которого считаются сообщения для лимита спама.",
             reply_markup=InlineKeyboardMarkup(keyboard)
         )
-    
+
+
+    elif data.startswith("private:keywords:"):
+        try:
+            chat_id = int(data.split(":")[2])
+
+            # Set the chat_id in user_data so list_keywords_private knows which group to show
+            context.user_data["selected_chat_id"] = chat_id
+            await list_keywords_private(update, context)
+
+        except (IndexError, ValueError) as e:
+            logger.error(f"Error processing keyword callback: {e}")
+            await query.edit_message_text("Произошла ошибка. Попробуйте снова.")
+
     elif action == "set_spam_limit":
         # Устанавливаем новое значение лимита спама
         if len(parts) < 3:
@@ -371,7 +386,25 @@ async def spam_settings_callback(update: Update, context: ContextTypes.DEFAULT_T
                 f"Не удалось разбанить пользователя: {str(e)}"
             )
             return
-            
+
+    elif action == "blacklist_links":
+    # Отображаем список запрещённых ссылок
+        try:
+            # Получаем информацию о чате
+            chat = await context.bot.get_chat(chat_id=chat_id)
+            chat_title = chat.title
+        except Exception:
+            chat_title = f"ID: {chat_id}"
+
+        # Сохраняем выбранный чат
+        context.user_data["selected_chat_id"] = chat_id
+
+        try:
+            await allowed_links_list(update, context)
+        except Exception as e:
+            logger.error(f"Error in blacklist_links: {e}")
+            await query.edit_message_text("Произошла ошибка при получении чёрного списка ссылок.")
+
     elif action == "link_spam_toggle":
         # Переключение блокировки за ссылки
         try:
@@ -464,5 +497,5 @@ def get_spam_settings_handlers() -> List[BaseHandler]:
     """Return all handlers for spam settings."""
     return [
         # Обработчики для кнопок в интерфейсе настроек спама
-        CallbackQueryHandler(spam_settings_callback, pattern=r"^(spam_limit|spam_interval|set_spam_limit|set_spam_interval|link_spam_toggle|link_spam_limit|set_link_spam_limit|show_banned|unban_user):"),
-    ]
+        CallbackQueryHandler(spam_settings_callback, pattern=r"^(spam_limit|spam_interval|set_spam_limit|set_spam_interval|link_spam_toggle|link_spam_limit|set_link_spam_limit|show_banned|unban_user|blacklist_links):"),
+        ]

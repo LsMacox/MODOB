@@ -16,6 +16,8 @@ from telegram import Update, User, ChatMemberAdministrator, ChatMemberOwner
 from telegram.ext import ContextTypes
 
 from .config import settings
+from .database import async_session
+from .handlers.keyword_management import is_link_allowed
 from .models import GroupSetting
 
 # (chat_id, user_id) -> timestamps deque
@@ -34,6 +36,7 @@ BAN_DURATIONS = (60, 300, 1800, 3600, 21600)  # 1m, 5m, 30m, 1h, 6h
 # Регулярное выражение для обнаружения ссылок
 _url_pattern = re.compile(r'https?://\S+|www\.\S+|t\.me/\S+|@\w+', re.IGNORECASE)
 
+logger = logging.getLogger(__name__)
 
 async def check_spam(
     update: Update,
@@ -113,20 +116,27 @@ async def check_spam(
             link_spam_limit = settings.LINK_SPAM_LIMIT
         
         if link_spam_enabled:
-            # Проверяем наличие ссылок в сообщении
-            if _url_pattern.search(update.message.text):
-                # Отслеживаем историю отправки ссылок
-                link_history = _link_history[(chat_id, user_id)]
-                link_history.append(now)
+            urls = _url_pattern.findall(update.message.text)
+            if urls:
+                async with async_session() as session:
+                    for url in urls:
+                        if await is_link_allowed(session, chat_id, url):
+                            logger.info(f'Allowed link detected  {url} in chat {chat_id}')
+                            continue
+
+                        else:
+                            logger.info(f"Forbidden link detected {url} in chat {chat_id}")
+                            link_history = _link_history[(chat_id, user_id)]
+                            link_history.append(now)
                 
-                # Удаляем старые записи (используем тот же временной интервал)
-                while link_history and now - link_history[0] > interval:
-                    link_history.popleft()
-                
-                # Если превышен лимит ссылок, блокируем пользователя
-                if len(link_history) >= link_spam_limit:
-                    await _ban_user(chat_id, user_id, context, "отправку слишком большого количества ссылок")
-                    return True
+                            # Удаляем старые записи (используем тот же временной интервал)
+                            while link_history and now - link_history[0] > interval:
+                                link_history.popleft()
+
+                            # Если превышен лимит ссылок, блокируем пользователя
+                            if len(link_history) >= link_spam_limit:
+                                await _ban_user(chat_id, user_id, context, "отправку слишком большого количества ссылок")
+                                return True
 
     return False
 
