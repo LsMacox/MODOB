@@ -1,15 +1,18 @@
 """Keyword management system: add, remove, edit keywords via commands & inline buttons."""
 from __future__ import annotations
 
+import re
 import logging
 from typing import Optional, List, Tuple
 
 from sqlalchemy import select, delete
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from sqlalchemy.orm import Session
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, InlineKeyboardMarkup
+from telegram.error import TelegramError
 from telegram.ext import ContextTypes, ConversationHandler, CommandHandler, CallbackQueryHandler, MessageHandler, filters
 
 from ..database import async_session
-from ..models import GroupSetting, Keyword
+from ..models import GroupSetting, Keyword, AllowedLink
 
 logger = logging.getLogger(__name__)
 
@@ -17,6 +20,9 @@ logger = logging.getLogger(__name__)
 AWAITING_KEYWORD_PHRASE = 1
 AWAITING_NEW_RESPONSE = 2
 CONFIRM_DELETE = 3
+WAITING_NEW_LINK = 4
+WAITING_LINK_RESPONSE = 5
+
 
 # Callback data prefixes
 CALLBACK_KEYWORD_PREFIX = "kw:"  # General prefix for keyword operations
@@ -44,6 +50,27 @@ async def start_add_keyword(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     )
     return AWAITING_KEYWORD_PHRASE
 
+async def start_add_link(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Starts the conversation to add a new keyword."""
+    query = update.callback_query
+    await query.answer()
+
+    try:
+        chat_id = int(query.data.split(":")[2])
+        context.user_data['selected_chat_id'] = chat_id
+        chat = await context.bot.get_chat(chat_id)
+    except (IndexError, ValueError, TelegramError) as e:
+        logger.error(f"Error starting add_link conversation: {e}")
+        await query.edit_message_text("Ошибка: не удалось определить группу. Попробуйте снова.")
+        return ConversationHandler.END
+
+    await query.edit_message_text(
+        f"Добавление разрешенной ссылки в группу <b>{chat.title}</b>.\n\n"
+        f"Пожалуйста, отправьте ссылку.",
+        parse_mode="HTML"
+    )
+    return WAITING_NEW_LINK
+
 
 async def get_keyword_phrase(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Receives the keyword phrase and asks for the response."""
@@ -61,6 +88,20 @@ async def get_keyword_phrase(update: Update, context: ContextTypes.DEFAULT_TYPE)
     )
     return AWAITING_NEW_RESPONSE
 
+# async def get_link(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+#     """Receives the keyword phrase and asks for the response."""
+#     if not update.message or not update.message.text:
+#         await update.message.reply_text("Это не похоже на ссылку. Пожалуйста, попробуйте снова.")
+#         return WAITING_NEW_LINK
+#
+#     link = update.message.text.strip().lower()
+#     context.user_data['allowed_links'] = link
+#
+#     await update.message.reply_text(
+#         f"Отлично! Ссылка '<b>{link}</b>' принята.\n\n",
+#         parse_mode="HTML"
+#     )
+#     return WAITING_LINK_RESPONSE
 
 async def get_keyword_response(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Receives the response, saves the keyword, and ends the conversation."""
@@ -108,11 +149,55 @@ async def get_keyword_response(update: Update, context: ContextTypes.DEFAULT_TYP
     return ConversationHandler.END
 
 
+async def get_link(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Receives the link, saves it to the database, and ends the conversation."""
+    link = update.message.text.strip()
+    chat_id = context.user_data.get('selected_chat_id')
+    logger.info(f"Received link: {link}, chat_id: {chat_id}")
+
+    async with async_session() as session:
+        group_setting = await session.scalar(select(GroupSetting).where(GroupSetting.chat_id == chat_id))
+        logger.info(f"Group setting: {group_setting}")
+        kw = AllowedLink(group_id=group_setting.id, url=link,)
+        session.add(kw)
+        await session.commit()
+        logger.info(f"Link saved: {link}")
+
+    keyboard = [[InlineKeyboardButton("« Назад к управлению группой", callback_data=f"private:manage:{chat_id}")]]
+    await update.message.reply_text(
+        f"✅ Ссылка <b>{link}</b> успешно добавлена!",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode="HTML"
+    )
+    context.user_data.clear()
+    return ConversationHandler.END
+
+async def is_link_allowed(session, chat_id: int, url: str) -> bool:
+    """Check if a URL is in the allowed links for a given chat."""
+    stmt = (
+        select(AllowedLink)
+        .join(GroupSetting)
+        .where(GroupSetting.chat_id == chat_id, AllowedLink.url == url)
+    )
+    result = await session.scalar(stmt)
+    return result is not None
+
 async def cancel_add_keyword(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Cancels the keyword adding process."""
     chat_id = context.user_data.get('selected_chat_id')
     await update.message.reply_text("Добавление ключевого слова отменено.")
     
+    # Clean up user_data
+    context.user_data.pop('selected_chat_id', None)
+    context.user_data.pop('new_keyword_phrase', None)
+
+    return ConversationHandler.END
+
+async def remove_link(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Cancels the keyword adding process."""
+    chat_id = context.user_data.get('selected_chat_id')
+    await update.message.reply_text("Добавление разрешенной ссылки отменено.")
+
     # Clean up user_data
     context.user_data.pop('selected_chat_id', None)
     context.user_data.pop('new_keyword_phrase', None)
@@ -281,7 +366,20 @@ async def keyword_button_callback(update: Update, context: ContextTypes.DEFAULT_
             logger.error(f"Error extracting keyword_id for deletion: {e}")
             await query.answer("Ошибка при удалении ключевого слова")
             return ConversationHandler.END
-        
+
+    # Handle delete operations
+    if data.startswith("link:delete:"):
+        logger.debug(f"Processing delete operation with data: {data}")
+        try:
+            link_id = int(data[len("link:delete:"):])
+            logger.info(f"Attempting to delete keyword with ID: {link_id}")
+            await delete_link_by_id(update, context, link_id)
+            return ConversationHandler.END
+        except (ValueError, IndexError) as e:
+            logger.error(f"Error extracting link_id for deletion: {e}")
+            await query.answer("Ошибка при удалении ссылки")
+            return ConversationHandler.END
+
     # Handle edit operations
     if data.startswith(CALLBACK_EDIT_PREFIX):
         logger.debug(f"Processing edit operation with data: {data}")
@@ -301,7 +399,7 @@ async def keyword_button_callback(update: Update, context: ContextTypes.DEFAULT_
         keyword_id = int(data[len("kw_toggle_pattern:"):])
         await toggle_keyword_option(update, context, keyword_id, "pattern")
         return
-        
+
     if data.startswith("kw_toggle_case:"):
         logger.debug("Processing toggle case option")
         keyword_id = int(data[len("kw_toggle_case:"):])
@@ -380,6 +478,53 @@ async def delete_keyword_by_id(update: Update, context: ContextTypes.DEFAULT_TYP
             logger.error(f"Error updating keywords list after deletion: {e}")
             # Fallback to standard refresh
             await refresh_keywords_list(update, context)
+
+async def delete_link_by_id(update: Update, context: ContextTypes.DEFAULT_TYPE, link_id: int) -> None:
+    """Delete a keyword by its ID and refresh the keywords list"""
+    query = update.callback_query
+    if not query or not query.message or not update.effective_chat:
+        return
+
+
+    async with async_session() as session:
+        link = await session.get(AllowedLink, link_id)
+        if not link:
+            await query.answer("Ссылка не найдена или уже удалена.")
+            # Refresh keyword list
+            await refresh_links_list(update, context)
+            return
+
+        # Получаем данные о ключевом слове перед удалением
+        url = link.url
+        chat_id = None
+
+        # Получаем chat_id от группы, которой принадлежит ключевое слово
+        group = await session.get(GroupSetting, link.group_id)
+        if group:
+            chat_id = group.chat_id
+
+        # Удаляем ключевое слово
+        await session.delete(link)
+        await session.commit()
+
+        # Сохраняем chat_id в контексте для обновления списка
+        if chat_id:
+            context.user_data["selected_chat_id"] = chat_id
+
+        # Show quick notification without changing the message
+        await query.answer(f"Ссылка '{url}' удалена")
+
+        try:
+            # Если обрабатываем в приватном чате
+            if update.effective_chat.type == "private" and chat_id:
+                await allowed_links_list(update, context)
+            else:
+                # Иначе обычное обновление списка
+                await refresh_links_list(update, context)
+        except Exception as e:
+            logger.error(f"Error updating links list after deletion: {e}")
+            # Fallback to standard refresh
+            await refresh_links_list(update, context)
 
 async def start_edit_response(update: Update, context: ContextTypes.DEFAULT_TYPE, keyword_id: int) -> int:
     """Start the process of editing a keyword response"""
@@ -547,13 +692,59 @@ async def refresh_keywords_list(update: Update, context: ContextTypes.DEFAULT_TY
                 InlineKeyboardButton(f"{kw.phrase}", callback_data=f"{CALLBACK_EDIT_PREFIX}{kw.id}"),
                 InlineKeyboardButton("❌", callback_data=f"{CALLBACK_DELETE_PREFIX}{kw.id}")
             ])
-        
+
         # Add add word button and back button
         keyboard.append([InlineKeyboardButton("➕ Добавить слово", callback_data=f"kw:add_start:{chat_id}")])
         keyboard.append([InlineKeyboardButton("« Назад к управлению группой", callback_data=f"private:manage:{chat_id}")])
         
         message_text = "Управление ключевыми словами:\nНажмите на слово для редактирования или на ❌ для удаления"
         
+        await query.edit_message_text(
+            message_text,
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+
+async def refresh_links_list(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Refresh the keywords list inline without creating a new message"""
+    query = update.callback_query
+    if not query or not query.message:
+        return
+
+    # Use selected_chat_id from user_data if available, otherwise use effective_chat.id
+    chat_id = context.user_data.get("selected_chat_id") or (update.effective_chat.id if update.effective_chat else None)
+    if not chat_id:
+        await query.answer("Ошибка: не удалось определить ID чата")
+        return
+
+    async with async_session() as session:
+        links = await get_all_links(session, chat_id)
+
+        if not links:
+            # If no keywords left, show empty message with add button
+            keyboard = [
+                [InlineKeyboardButton("➕ Добавить слово", callback_data=f"link:add_start:{chat_id}")],
+                [InlineKeyboardButton("« Назад к управлению группой", callback_data=f"private:manage:{chat_id}")]
+            ]
+            await query.edit_message_text(
+                "Список ключевых слов пуст.",
+                reply_markup=InlineKeyboardMarkup(keyboard)
+            )
+            return
+
+        # Create inline keyboard with action buttons
+        keyboard = []
+        for kw in links:
+            keyboard.append([
+                InlineKeyboardButton(f"{kw.url}", callback_data=f"link_edit:{kw.id}"),
+                InlineKeyboardButton("❌", callback_data=f"link:delete:{kw.id}")
+            ])
+
+        # Add add word button and back button
+        keyboard.append([InlineKeyboardButton("➕ Добавить слово", callback_data=f"link:add_start:{chat_id}")])
+        keyboard.append([InlineKeyboardButton("« Назад к управлению группой", callback_data=f"private:manage:{chat_id}")])
+
+        message_text = "Управление ключевыми словами:\nНажмите на слово для редактирования или на ❌ для удаления"
+
         await query.edit_message_text(
             message_text,
             reply_markup=InlineKeyboardMarkup(keyboard)
@@ -575,6 +766,16 @@ async def get_all_keywords(session, chat_id: int) -> List[Keyword]:
         .join(GroupSetting)
         .where(GroupSetting.chat_id == chat_id)
         .order_by(Keyword.phrase)
+    )
+    return (await session.scalars(stmt)).all()
+
+async def get_all_links(session, chat_id: int) -> List[Keyword]:
+    """Get all keywords for the given chat"""
+    stmt = (
+        select(AllowedLink)
+        .join(GroupSetting)
+        .where(GroupSetting.chat_id == chat_id)
+        .order_by(AllowedLink.url)
     )
     return (await session.scalars(stmt)).all()
 
@@ -622,6 +823,71 @@ def get_edit_keyword_conversation_handler() -> ConversationHandler:
         persistent=False,
         allow_reentry=True
     )
+
+
+async def allowed_links_list(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """List keywords for a specific group when accessed through private chat."""
+    if not update.effective_user or not update.callback_query:
+        return
+
+    # Get the selected chat_id from user_data
+    chat_id = context.user_data.get("selected_chat_id")
+    if not chat_id:
+        await update.callback_query.edit_message_text(
+            "Ошибка: не выбрана группа для управления разрешенными ссылками."
+        )
+        return
+
+    # Verify the user is still an admin in this chat
+    try:
+        member = await context.bot.get_chat_member(chat_id=chat_id, user_id=update.effective_user.id)
+        if member.status not in ["administrator", "creator"]:
+            await update.callback_query.edit_message_text("Вы больше не администратор в этой группе.")
+            return
+    except Exception as e:
+        logger.error(f"Error checking admin status: {e}")
+        await update.callback_query.edit_message_text("Не удалось проверить права администратора в группе.")
+        return
+
+    # Get the chat title
+    chat = await context.bot.get_chat(chat_id=chat_id)
+
+    # Get keywords for this group
+    async with async_session() as session:
+        group = await session.scalar(
+            select(GroupSetting).where(GroupSetting.chat_id == chat_id)
+        )
+        if not group:
+            await update.callback_query.edit_message_text("Данные о группе не найдены в базе данных.")
+            return
+        allowed_links = await session.scalars(select(AllowedLink).where(AllowedLink.group_id == group.id))
+
+        allowed_links = allowed_links.all()
+        # Create inline keyboard with edit/delete buttons
+        links = []
+        for kw in allowed_links:
+            links.append([
+                InlineKeyboardButton(f"{kw.url}", callback_data=f"link_edit:{kw.id}"),
+                InlineKeyboardButton("❌", callback_data=f"link:delete:{kw.id}")
+            ])
+
+        # Add button to add a new keyword and to return to group management
+        links.append([InlineKeyboardButton("➕ Добавить ссылку", callback_data=f"link:add_start:{chat_id}")])
+        links.append(
+            [InlineKeyboardButton("« Назад к управлению группой", callback_data=f"private:manage:{chat_id}")])
+
+        # Prepare message text
+        message_text = f"разрешенные ссылки для группы {chat.title}:\n"
+        message_text += "Нажмите на ссылку для редактирования или на ❌ для удаления из разрешенных"
+        if not allowed_links:
+            message_text += "\n\nСписок ключевых слов пуст."
+
+        # Edit the message with new content
+        await update.callback_query.edit_message_text(
+            text=message_text,
+            reply_markup=InlineKeyboardMarkup(links)
+        )
+
 
 async def list_keywords_private(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """List keywords for a specific group when accessed through private chat."""
@@ -689,12 +955,16 @@ async def list_keywords_private(update: Update, context: ContextTypes.DEFAULT_TY
 def get_keyword_management_handlers():
     """Return all handlers for keyword management"""
     add_keyword_conv_handler = ConversationHandler(
-        entry_points=[CallbackQueryHandler(start_add_keyword, pattern="^kw:add_start:")],
+        entry_points=[CallbackQueryHandler(start_add_keyword, pattern="^kw:add_start:"),
+                      CallbackQueryHandler(start_add_link, pattern="^link:add_start:"),],
         states={
             AWAITING_KEYWORD_PHRASE: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_keyword_phrase)],
             AWAITING_NEW_RESPONSE: [MessageHandler(filters.ALL & ~filters.COMMAND, get_keyword_response)],
+            WAITING_NEW_LINK: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_link)],
         },
-        fallbacks=[CommandHandler('cancel', cancel_add_keyword)],
+
+        fallbacks=[CommandHandler('cancel', cancel_add_keyword),
+                   CommandHandler('cancel', remove_link)],
         per_message=False,
         name="add_keyword_conversation",
     )
@@ -702,9 +972,10 @@ def get_keyword_management_handlers():
     # This handler will manage all non-conversation callbacks for keywords
     # (delete, toggle, back, etc.)
     keyword_callbacks = CallbackQueryHandler(
-        keyword_button_callback, 
-        pattern=f"^({CALLBACK_DELETE_PREFIX}|{CALLBACK_EDIT_PREFIX}|kw_toggle_pattern:|kw_toggle_case:|kw_toggle_translit:|kw_toggle_fuzzy:|kw:back_to_list)"
+        keyword_button_callback,
+        pattern=f"^({CALLBACK_DELETE_PREFIX}|{CALLBACK_EDIT_PREFIX}|kw_toggle_pattern:|kw_toggle_case:|kw_toggle_translit:|kw_toggle_fuzzy:|kw:back_to_list:|link:delete:|link_edit:)"
     )
+
 
     return [
         add_keyword_conv_handler,
