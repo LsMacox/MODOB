@@ -9,7 +9,7 @@ from telegram.ext import ContextTypes, CommandHandler, filters, CallbackQueryHan
 from telegram.error import TelegramError
 
 from ..database import async_session
-from ..models import GroupSetting, Keyword
+from ..models import GroupSetting, Keyword, AllowedLink
 from .keyword_management import list_keywords_private
 from ..access_control import restricted
 
@@ -172,7 +172,7 @@ async def private_chat_callback(update: Update, context: ContextTypes.DEFAULT_TY
             [InlineKeyboardButton("❓ Справка по группе", callback_data=f"private:help:{chat_id}")],
             [InlineKeyboardButton("« Назад к списку групп", callback_data="private:back_to_groups")]
         ]
-        
+
         # Create group info message
         message_text = f"📣 Управление группой: {chat.title}\n\n"
         
@@ -258,7 +258,7 @@ async def private_chat_callback(update: Update, context: ContextTypes.DEFAULT_TY
         except (IndexError, ValueError) as e:
             logger.error(f"Error processing keyword callback: {e}")
             await query.edit_message_text("Произошла ошибка. Попробуйте снова.")
-    
+
     # Handle spam settings for a specific group
     elif data.startswith("private:spam:"):
         try:
@@ -295,7 +295,11 @@ async def private_chat_callback(update: Update, context: ContextTypes.DEFAULT_TY
                 keyword_count = await session.scalar(
                     select(func.count()).select_from(Keyword).where(Keyword.group_id == group.id)
                 )
-            
+
+                link_count = await session.scalar(
+                    select(func.count()).select_from(AllowedLink).where(AllowedLink.group_id == group.id)
+                )
+
             # Create help keyboard with back button
             keyboard = [
                 [InlineKeyboardButton("« Назад", callback_data=f"private:manage:{chat_id}")]
@@ -306,6 +310,7 @@ async def private_chat_callback(update: Update, context: ContextTypes.DEFAULT_TY
             
             # Добавляем все настройки группы в один раздел
             help_text += f"• Количество ключевых слов: {keyword_count or 0}\n"
+            help_text += f"• Количество разрешенных ссылок: {link_count or 0}\n"
             help_text += f"• Лимит спама: {group.spam_limit}\n"
             help_text += f"• Интервал спама: {group.spam_interval} сек.\n"
             help_text += f"• Лимит повторяющихся сообщений: {group.repeat_limit}\n"
@@ -319,11 +324,10 @@ async def private_chat_callback(update: Update, context: ContextTypes.DEFAULT_TY
                 reply_markup=InlineKeyboardMarkup(keyboard),
                 parse_mode="HTML"
             )
-            
+
         except (IndexError, ValueError, TelegramError) as e:
             logger.error(f"Error processing help callback: {e}")
             await query.edit_message_text("Произошла ошибка. Попробуйте снова.")
-
 
 def get_private_chat_handlers():
     """Return handlers for private chat functionality."""

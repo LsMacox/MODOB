@@ -6,6 +6,9 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from .database import Base
 
+
+
+
 class GroupSetting(Base):
     __tablename__ = "group_settings"
 
@@ -20,9 +23,22 @@ class GroupSetting(Base):
     link_spam_limit: Mapped[int] = mapped_column(Integer, default=3)  # Количество ссылок до блокировки
     link_spam_enabled: Mapped[bool] = mapped_column(Boolean, default=True)  # Включена ли блокировка за ссылки
 
+    allowed_links: Mapped[list["AllowedLink"]] = relationship(
+        "AllowedLink",
+        back_populates="group", cascade="all, delete-orphan"
+    )
+
     keywords: Mapped[list["Keyword"]] = relationship(
         back_populates="group", cascade="all, delete-orphan"
     )
+
+class AllowedLink(Base):
+    __tablename__ = "allowed_links"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    url: Mapped[str] = mapped_column(String(255), nullable=False)
+    group_id: Mapped[int] = mapped_column(Integer, ForeignKey("group_settings.id", ondelete="CASCADE"))
+    group: Mapped["GroupSetting"] = relationship(back_populates="allowed_links")
 
 class Keyword(Base):
     __tablename__ = "keywords"
