@@ -163,7 +163,7 @@ async def get_link(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         await session.commit()
         logger.info(f"Link saved: {link}")
 
-    keyboard = [[InlineKeyboardButton("« Назад к управлению группой", callback_data=f"private:manage:{chat_id}")]]
+    keyboard = [[InlineKeyboardButton("« Назад в настройки антиспама", callback_data=f"private:spam:{chat_id}")]]
     await update.message.reply_text(
         f"✅ Ссылка <b>{link}</b> успешно добавлена!",
         reply_markup=InlineKeyboardMarkup(keyboard),
@@ -723,7 +723,7 @@ async def refresh_links_list(update: Update, context: ContextTypes.DEFAULT_TYPE)
             # If no keywords left, show empty message with add button
             keyboard = [
                 [InlineKeyboardButton("➕ Добавить слово", callback_data=f"link:add_start:{chat_id}")],
-                [InlineKeyboardButton("« Назад к управлению группой", callback_data=f"private:manage:{chat_id}")]
+                [InlineKeyboardButton("« Назад в настройки антиспама", callback_data=f"private:spam:{chat_id}")]
             ]
             await query.edit_message_text(
                 "Список ключевых слов пуст.",
@@ -741,7 +741,7 @@ async def refresh_links_list(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
         # Add add word button and back button
         keyboard.append([InlineKeyboardButton("➕ Добавить слово", callback_data=f"link:add_start:{chat_id}")])
-        keyboard.append([InlineKeyboardButton("« Назад к управлению группой", callback_data=f"private:manage:{chat_id}")])
+        keyboard.append([InlineKeyboardButton("« Назад в настройки антиспама", callback_data=f"private:spam:{chat_id}")])
 
         message_text = "Управление ключевыми словами:\nНажмите на слово для редактирования или на ❌ для удаления"
 
@@ -871,10 +871,10 @@ async def allowed_links_list(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 InlineKeyboardButton("❌", callback_data=f"link:delete:{kw.id}")
             ])
 
-        # Add button to add a new keyword and to return to group management
+        # Add button to add a new link and to return to spam settings
         links.append([InlineKeyboardButton("➕ Добавить ссылку", callback_data=f"link:add_start:{chat_id}")])
         links.append(
-            [InlineKeyboardButton("« Назад к управлению группой", callback_data=f"private:manage:{chat_id}")])
+            [InlineKeyboardButton("« Назад в настройки антиспама", callback_data=f"private:spam:{chat_id}")])
 
         # Prepare message text
         message_text = f"разрешенные ссылки для группы {chat.title}:\n"
